@@ -7,7 +7,7 @@
 BENCH_TARGET ?= bench
 
 # number of benchmark iterations to run
-ITER ?= 5
+ITER ?= 2
 
 # setup default for pre benchmark wrappers
 # for example PRE_BENCH_EXEC='taskset --cpu-list 3 setarch `uname -m` --addr-no-randomize'

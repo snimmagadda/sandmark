@@ -1,12 +1,9 @@
-#define _GNU_SOURCE
+#ifdef __linux__
 #include <linux/perf_event.h>
-#include <linux/hw_breakpoint.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
-#include <signal.h>
-#include <linux/perf_event.h>
 #include <asm/unistd.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -416,3 +413,12 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds)
 
     CAMLreturn( result );
 }
+#endif
+
+#ifdef __APPLE__
+    value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds) {
+        CAMLparam2(ml_pid, ml_pipe_fds);
+
+        CAMLreturn( Val_unit );
+    }
+#endif

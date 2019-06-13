@@ -141,7 +141,6 @@ let exec_prog profiling output_name prog cmdline env stdin stdout stderr =
   else
     Unix.(create_process_env prog cmdline env stdin stdout stderr)
 
-
 let run output input cmdline =
   let prog = List.hd cmdline in
   (* workaround for the lack of execve *)

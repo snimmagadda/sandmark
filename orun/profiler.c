@@ -1,3 +1,9 @@
+#include <caml/mlvalues.h>
+#include <caml/memory.h>
+#include <caml/alloc.h>
+#include <caml/fail.h>
+#include <caml/bigarray.h>
+
 #ifdef __linux__
 #include <linux/perf_event.h>
 #include <unistd.h>
@@ -15,12 +21,6 @@
 #include <poll.h>
 #include <fcntl.h>
 #include <elfutils/libdwfl.h>
-
-#include <caml/mlvalues.h>
-#include <caml/memory.h>
-#include <caml/alloc.h>
-#include <caml/fail.h>
-#include <caml/bigarray.h>
 
 #define DATA_PAGES 1024
 #define INITIAL_LIST_LENGTH 512

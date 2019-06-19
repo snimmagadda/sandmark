@@ -1,22 +1,17 @@
-type sample = {
-    comp_dir: string;
-    filename: string;
-    line: int;
-}
+type sample = {comp_dir: string; filename: string; line: int}
 
-type profiling_result = {
-  samples: sample list
-}
+type profiling_result = {samples: sample list}
 
-external unpause_and_start_profiling : int -> Unix.file_descr -> profiling_result = "ml_unpause_and_start_profiling"
+external unpause_and_start_profiling :
+  int -> Unix.file_descr -> profiling_result
+  = "ml_unpause_and_start_profiling"
 
-let int_of_fd (x: Unix.file_descr) : int = Obj.magic x
+let int_of_fd (x : Unix.file_descr) : int = Obj.magic x
 
 let rec file_descr_not_standard (fd : Unix.file_descr) =
-  if int_of_fd(fd) >= 3 then fd else file_descr_not_standard (Unix.dup fd)
+  if int_of_fd fd >= 3 then fd else file_descr_not_standard (Unix.dup fd)
 
-let safe_close fd =
-  try Unix.close fd with Unix.Unix_error(_,_,_) -> ()
+let safe_close fd = try Unix.close fd with Unix.Unix_error (_, _, _) -> ()
 
 let perform_redirections new_stdin new_stdout new_stderr =
   let new_stdin = file_descr_not_standard new_stdin in
@@ -25,29 +20,42 @@ let perform_redirections new_stdin new_stdout new_stderr =
   (*  The three dup2 close the original stdin, stdout, stderr,
       which are the descriptors possibly left open
       by file_descr_not_standard *)
-  Unix.dup2 ~cloexec:false new_stdin Unix.stdin;
-  Unix.dup2 ~cloexec:false new_stdout Unix.stdout;
-  Unix.dup2 ~cloexec:false new_stderr Unix.stderr;
-  safe_close new_stdin;
-  safe_close new_stdout;
-safe_close new_stderr
+  Unix.dup2 ~cloexec:false new_stdin Unix.stdin ;
+  Unix.dup2 ~cloexec:false new_stdout Unix.stdout ;
+  Unix.dup2 ~cloexec:false new_stderr Unix.stderr ;
+  safe_close new_stdin ;
+  safe_close new_stdout ;
+  safe_close new_stderr
 
 let rec wait_for_parent parent_ready =
-  let read_fds, _write_fds, _exception_fds = Unix.select [parent_ready] [] [] (-1.0) in
-    if List.mem parent_ready read_fds then
-      ()
-    else
-      wait_for_parent parent_ready 
+  let read_fds, _write_fds, _exception_fds =
+    Unix.select [parent_ready] [] [] (-1.0)
+  in
+  if List.mem parent_ready read_fds then () else wait_for_parent parent_ready
 
 let create_process_env_paused cmd args env new_stdin new_stdout new_stderr =
-  let (parent_ready, parent_ready_write) = Unix.pipe () in
-  match Unix.fork() with
-    0 ->
-      begin try
-        perform_redirections new_stdin new_stdout new_stderr;
-        wait_for_parent parent_ready;
-        Unix.execvpe cmd args env
-      with _ ->
-        exit 127
-      end
-| id -> (id, parent_ready_write)
+  let parent_ready, parent_ready_write = Unix.pipe () in
+  match Unix.fork () with
+  | 0 -> (
+    try
+      perform_redirections new_stdin new_stdout new_stderr ;
+      wait_for_parent parent_ready ;
+      Unix.execvpe cmd args env
+    with _ -> exit 127 )
+  | id ->
+      (id, parent_ready_write)
+
+let write_profiling_result output_name result =
+  let profile_out = open_out_bin (output_name ^ ".prof") in
+  let json_results =
+    `List
+      (List.map
+         (fun (sample : sample) ->
+           `List
+             [ `String sample.comp_dir
+             ; `String sample.filename
+             ; `Int sample.line ] )
+         result.samples)
+  in
+  Yojson.Basic.to_channel profile_out json_results ;
+  close_out profile_out

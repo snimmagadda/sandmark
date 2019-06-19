@@ -45,17 +45,64 @@ let create_process_env_paused cmd args env new_stdin new_stdout new_stderr =
   | id ->
       (id, parent_ready_write)
 
+type source_line = { source: string; line: int }
+
+module StringMap = Map.Make(String)
+module IntMap = Map.Make(struct type t = int let compare = Pervasives.compare end)
+
+let absolute_source_path sample =
+  if Filename.is_relative sample.filename then
+    {source = sample.comp_dir ^ "/" ^ sample.filename; line = sample.line}
+  else
+    {source = sample.filename; line = sample.line}
+    
+
+let update_line_map m l =
+  IntMap.update l (fun e -> match e with | Some(v) -> (Some (v + 1)) | None -> (Some 1)) m
+
+let update_source_map m s =
+  StringMap.update s.source (fun e -> let v = match e with | Some(x) -> x | None -> IntMap.empty in Some(update_line_map v s.line)) m
+
+let slash_regex = Str.regexp "[/\.]"
+
+let safe_file_name x =
+  Str.global_replace slash_regex "_" x
+
+let write_source_file name res src_file =
+  let line_map = StringMap.find src_file res in
+  let new_src_file = safe_file_name src_file in
+  let original_src = open_in src_file in
+  let new_src = open_out (name ^ "_prof_results/" ^ new_src_file ^ ".html") in
+  let current_line = ref 1 in
+    try
+  while true; do
+    let src_line = input_line original_src in
+    let count = match IntMap.find_opt !current_line line_map with
+                | Some(x) -> x
+                | None -> 0 in
+    output_string new_src ((string_of_int count) ^ ": " ^ src_line ^ "\n");
+    incr current_line
+  done; ()
+with End_of_file ->
+  begin
+    close_out new_src;
+    close_in original_src;
+  end
+
+
 let write_profiling_result output_name result =
+  (* first write out the json representation of results *)
+  let total_samples = List.length result.samples in
+  let source_lines = List.map (fun s -> absolute_source_path s) result.samples in
+  let aggregate_results = List.fold_left update_source_map StringMap.empty source_lines in
   let profile_out = open_out_bin (output_name ^ ".prof") in
   let json_results =
-    `List
-      (List.map
-         (fun (sample : sample) ->
-           `List
-             [ `String sample.comp_dir
-             ; `String sample.filename
-             ; `Int sample.line ] )
-         result.samples)
+    (`Assoc (List.map (fun (k,v) -> (k, `List (List.map (fun (a,b) -> `List [`Int a; `Int b]) (IntMap.bindings v)))) (StringMap.bindings aggregate_results)))
   in
-  Yojson.Basic.to_channel profile_out json_results ;
-  close_out profile_out
+  Yojson.Basic.to_channel profile_out json_results;
+  close_out profile_out;
+  let dir_name = output_name ^ "_prof_results" in
+    if not (Sys.file_exists dir_name) then Unix.mkdir dir_name 0o740;
+  (* Now we actually write out an HTML report *)
+  let source_files_that_exist = Seq.filter_map (fun (k,v) -> if (Sys.file_exists k) then Some(k) else None) (StringMap.to_seq aggregate_results) in
+    Seq.iter (write_source_file output_name aggregate_results) source_files_that_exist

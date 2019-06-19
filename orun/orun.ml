@@ -158,7 +158,7 @@ let exec_prog profiling output_name prog cmdline env stdin stdout stderr =
     let pid, parent_ready =
       Profiler.create_process_env_paused prog cmdline env stdin stdout stderr
     in
-    let result = Profiler.unpause_and_start_profiling pid parent_ready in
+    let result : Profiler.profiling_result = Profiler.unpause_and_start_profiling pid parent_ready in
     Profiler.write_profiling_result output_name result ;
     pid )
   else Unix.create_process_env prog cmdline env stdin stdout stderr

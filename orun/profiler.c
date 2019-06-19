@@ -76,6 +76,7 @@ struct mmap_node {
     char* filename;
     uint64_t addr;
     uint64_t length;
+    uint64_t pgoff;
     struct mmap_node* next;
 };
 
@@ -134,6 +135,7 @@ int read_event(uint32_t type, unsigned char *buf, struct ip_list* ips, struct mm
 
         node->addr = record->addr;
         node->length = record->len;
+        node->pgoff = record->pgoff;
 
         if( head_ptr != NULL ) {
             node->next = *head_ptr;
@@ -191,7 +193,7 @@ value lookup_dwarf_data(struct mmap_node* head_ptr, struct ip_list* ips) {
     struct mmap_node* curr = head_ptr;
 
     while( curr != NULL ) {
-        Dwfl_Module* module = dwfl_report_elf(dwfl, (const char*)curr->filename, (const char*)curr->filename, -1, curr->addr, false);
+        Dwfl_Module* module = dwfl_report_elf(dwfl, (const char*)curr->filename, (const char*)curr->filename, -1, curr->addr - curr->pgoff, false);
 
         curr = curr->next;
     }
@@ -215,7 +217,7 @@ value lookup_dwarf_data(struct mmap_node* head_ptr, struct ip_list* ips) {
                 record = caml_alloc(3, 0);
                 Store_field(record, 0, caml_copy_string(comp_dir));
                 Store_field(record, 1, caml_copy_string(filename));
-                Store_field(record, 2, lineno);
+                Store_field(record, 2, Val_int(lineno));
 
                 cell = caml_alloc(2, 0);
                 Store_field(cell, 0, record);

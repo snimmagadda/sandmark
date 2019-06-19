@@ -41,6 +41,7 @@ let rec wait_for_parent parent_ready =
 
 let create_process_env_paused cmd args env new_stdin new_stdout new_stderr =
   let (parent_ready, parent_ready_write) = Unix.pipe () in
+  print_endline ("stdin: " ^ (string_of_int (int_of_fd new_stdin)) ^ " stdout: " ^ (string_of_int (int_of_fd new_stdout)) ^ " stderr: " ^ (string_of_int (int_of_fd new_stderr)));
   match Unix.fork() with
     0 ->
       begin try

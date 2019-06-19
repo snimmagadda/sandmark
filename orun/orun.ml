@@ -147,13 +147,14 @@ let run output input cmdline =
   let prog = if Filename.is_implicit prog && Sys.file_exists prog then
                "./" ^ prog else prog in
   try
-    let profiling = match Sys.getenv_opt "PROFILE" with
+    let profiling = match Sys.getenv_opt "ORUN_CONFIG_PROFILE" with
     | None -> false
     | Some _ -> true
     in
     let before = Unix.gettimeofday () in
     let captured_stderr_filename = Filename.temp_file "orun" "stderr" in
     let stderr_fd = Unix.openfile captured_stderr_filename [Unix.O_WRONLY] 0600 in
+    print_endline ("stderr_fd: " ^ (string_of_int (Obj.magic stderr_fd)));
     let process_stdin = match input with 
       | Some stdin_file -> Unix.openfile stdin_file [] 0600
       | None -> Unix.stdin
@@ -209,10 +210,6 @@ let output =
 let input =
   let doc = "Optional file to use as stdin" in
   Arg.(value & opt (some string) None & info ["i"; "input"] ~docv:"FILE" ~doc)
-
-let profile =
-  let doc = "Optionally profile the run" in
-  Arg.(value & opt bool false & info ["p"; "profile"] ~doc)
 
 let target =
   Arg.(non_empty & pos_all string [] & info [] ~docv:"PROG")

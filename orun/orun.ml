@@ -154,7 +154,6 @@ let run output input cmdline =
     let before = Unix.gettimeofday () in
     let captured_stderr_filename = Filename.temp_file "orun" "stderr" in
     let stderr_fd = Unix.openfile captured_stderr_filename [Unix.O_WRONLY] 0600 in
-    print_endline ("stderr_fd: " ^ (string_of_int (Obj.magic stderr_fd)));
     let process_stdin = match input with 
       | Some stdin_file -> Unix.openfile stdin_file [] 0600
       | None -> Unix.stdin

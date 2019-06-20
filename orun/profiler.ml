@@ -104,5 +104,5 @@ let write_profiling_result output_name result =
   let dir_name = output_name ^ "_prof_results" in
     if not (Sys.file_exists dir_name) then Unix.mkdir dir_name 0o740;
   (* Now we actually write out an HTML report *)
-  let source_files_that_exist = Seq.filter_map (fun (k,v) -> if (Sys.file_exists k) then Some(k) else None) (StringMap.to_seq aggregate_results) in
-    Seq.iter (write_source_file output_name aggregate_results) source_files_that_exist
+  let source_files_that_exist = List.filter (fun (k,v) -> Sys.file_exists k) (StringMap.bindings aggregate_results) in
+    List.iter (write_source_file output_name aggregate_results) (List.map (fun (k,v) -> k) source_files_that_exist)

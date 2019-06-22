@@ -1,10 +1,20 @@
-type sample = {comp_dir: string; filename: string; line: int}
-
+type sample = {filename: string; line: int}
 type profiling_result = {samples: sample list}
 
 external unpause_and_start_profiling :
-  int -> Unix.file_descr -> profiling_result
+  int -> Unix.file_descr -> ( sample -> unit ) -> unit
   = "ml_unpause_and_start_profiling"
+
+let samples_list = ref []
+
+let sample_callback sample = 
+  samples_list := sample :: !samples_list
+
+let start_profiling pid pipe_fd =
+  unpause_and_start_profiling pid pipe_fd sample_callback;
+  let result = {samples = !samples_list} in
+    samples_list := [];
+    result
 
 let int_of_fd (x : Unix.file_descr) : int = Obj.magic x
 
@@ -45,23 +55,14 @@ let create_process_env_paused cmd args env new_stdin new_stdout new_stderr =
   | id ->
       (id, parent_ready_write)
 
-type source_line = { source: string; line: int }
-
 module StringMap = Map.Make(String)
 module IntMap = Map.Make(struct type t = int let compare = Pervasives.compare end)
-
-let absolute_source_path sample =
-  if Filename.is_relative sample.filename then
-    {source = sample.comp_dir ^ "/" ^ sample.filename; line = sample.line}
-  else
-    {source = sample.filename; line = sample.line}
-    
 
 let update_line_map m l =
   IntMap.update l (fun e -> match e with | Some(v) -> (Some (v + 1)) | None -> (Some 1)) m
 
 let update_source_map m s =
-  StringMap.update s.source (fun e -> let v = match e with | Some(x) -> x | None -> IntMap.empty in Some(update_line_map v s.line)) m
+  StringMap.update s.filename (fun e -> let v = match e with | Some(x) -> x | None -> IntMap.empty in Some(update_line_map v s.line)) m
 
 let slash_regex = Str.regexp "[/\.]"
 
@@ -93,8 +94,7 @@ with End_of_file ->
 let write_profiling_result output_name result =
   (* first write out the json representation of results *)
   let total_samples = List.length result.samples in
-  let source_lines = List.map (fun s -> absolute_source_path s) result.samples in
-  let aggregate_results = List.fold_left update_source_map StringMap.empty source_lines in
+  let aggregate_results = List.fold_left update_source_map StringMap.empty result.samples in
   let profile_out = open_out_bin (output_name ^ ".prof") in
   let json_results =
     (`Assoc (List.map (fun (k,v) -> (k, `List (List.map (fun (a,b) -> `List [`Int a; `Int b]) (IntMap.bindings v)))) (StringMap.bindings aggregate_results)))

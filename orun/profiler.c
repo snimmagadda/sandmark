@@ -21,9 +21,9 @@
 #include <poll.h>
 #include <fcntl.h>
 #include <elfutils/libdwfl.h>
+#include <limits.h>
 
 #define DATA_PAGES 1024
-#define INITIAL_LIST_LENGTH 512
 
 struct sample_id
 {
@@ -65,43 +65,6 @@ struct perf_event_record_sample
     uint64_t bnr;  /* if PERF_SAMPLE_BRANCH_STACK */
 };
 
-struct ip_list
-{
-    uint64_t *ips;
-    uint64_t length;
-    uint64_t pos;
-};
-
-struct mmap_node {
-    char* filename;
-    uint64_t addr;
-    uint64_t length;
-    uint64_t pgoff;
-    struct mmap_node* next;
-};
-
-void append_to_list( struct ip_list* list, uint64_t ip ) {
-    if( list->pos == list->length ) {
-        // Need to double the size of the list and copy the contents across
-        uint64_t* new_ips = malloc( (list->length*2) * sizeof(uint64_t) );
-
-        if( new_ips == NULL ) {
-            perror("malloc");
-            exit(-1);
-        }
-        
-        memcpy( new_ips, list->ips, list->length * sizeof(uint64_t) );
-        uint64_t* old_ips = list->ips;
-        list->ips = new_ips;
-        free(old_ips);
-        list->length *= 2;
-    }
-
-    list->ips[list->pos++] = ip;
-
-    return;
-}
-
 long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
                      int cpu, int group_fd, unsigned long flags)
 {
@@ -121,137 +84,119 @@ int poll_event(int fd)
     return pfd.revents;
 }
 
-int read_event(uint32_t type, unsigned char *buf, struct ip_list* ips, struct mmap_node** head_ptr)
+int get_line_info(Dwfl *dwfl, uint64_t ip, const char **ip_filename, const char **ip_comp_dir, int *ip_lineno)
 {
+    Dwfl_Line *line = dwfl_getsrc(dwfl, ip);
+
+    if (line != NULL)
+    {
+        Dwfl_Module *module = dwfl_linemodule(line);
+
+        const char *filename = dwfl_lineinfo(line, NULL, ip_lineno, NULL, NULL, NULL);
+
+        if (filename != NULL)
+        {
+            const char *comp_dir = dwfl_line_comp_dir(line);
+
+            *ip_filename = filename;
+            *ip_comp_dir = comp_dir;
+
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *dwfl)
+{
+    CAMLparam1(sample_callback);
+    CAMLlocal2(sample_record, callback_return);
+
     if (type == PERF_RECORD_MMAP2)
     {
-        struct perf_event_record_mmap2 *record = (struct perf_event_record_mmap2*)buf;
-        
-        struct mmap_node* node = malloc(sizeof(struct mmap_node));
+        struct perf_event_record_mmap2 *record = (struct perf_event_record_mmap2 *)buf;
 
-        node->filename = malloc(sizeof(record->filename[0]) * (strlen(record->filename)+1));
+        dwfl_report_begin_add(dwfl);
 
-        strcpy(node->filename, record->filename);
+        Dwfl_Module *module = dwfl_report_elf(dwfl, (const char *)record->filename, (const char *)record->filename, -1, record->addr - record->pgoff, false);
 
-        node->addr = record->addr;
-        node->length = record->len;
-        node->pgoff = record->pgoff;
-
-        if( head_ptr != NULL ) {
-            node->next = *head_ptr;
-        } else {
-            node->next = NULL;
-        }
-
-        *head_ptr = node;
+        dwfl_report_end(dwfl, NULL, NULL);
     }
     else if (type == PERF_RECORD_EXIT)
     {
+        CAMLdrop;
         return 0;
     }
     else if (type == PERF_RECORD_SAMPLE)
     {
-        struct perf_event_record_sample *record = (struct perf_event_record_sample*)buf;
+        struct perf_event_record_sample *record = (struct perf_event_record_sample *)buf;
 
         unsigned char *pos = buf + sizeof(struct perf_event_record_sample);
 
-        append_to_list(ips, record->ip);
+        uint64_t ip = record->ip;
 
-        //printf("ip: %lu, branches: %lu\n", record->ip, record->bnr);
-/*
-        for (int branches = 0; branches < record->bnr; branches++)
+        char *filename;
+        char *comp_dir;
+        int lineno;
+
+        if (get_line_info(dwfl, ip, &filename, &comp_dir, &lineno) >= 0)
         {
-            struct perf_branch_entry *entry = (struct perf_branch_entry *)pos;
+            int filename_length = strlen(filename);
 
-            printf("%d ip: %llu -> %llu (%d) [%u]\n", branches, entry->from, entry->to, entry->cycles, entry->mispred);
+            char full_path[filename_length + strlen(comp_dir) + 1];
 
-            pos += sizeof(struct perf_branch_entry);
-        }*/
-    }
-
-    return 1;
-}
-
-value lookup_dwarf_data(struct mmap_node* head_ptr, struct ip_list* ips) {
-    CAMLparam0();
-    CAMLlocal3(cell,record,sample_head);
-
-    sample_head = Val_int(0);
-
-    static char *debuginfo_path;
-
-    static const Dwfl_Callbacks offline_callbacks =
-    {
-        .find_debuginfo = dwfl_standard_find_debuginfo,
-        .debuginfo_path = &debuginfo_path,
-        .section_address = dwfl_offline_section_address,
-        .find_elf = dwfl_build_id_find_elf,
-    };
-
-    struct Dwfl* dwfl = dwfl_begin(&offline_callbacks);
-
-    struct mmap_node* curr = head_ptr;
-
-    while( curr != NULL ) {
-        Dwfl_Module* module = dwfl_report_elf(dwfl, (const char*)curr->filename, (const char*)curr->filename, -1, curr->addr - curr->pgoff, false);
-
-        curr = curr->next;
-    }
-
-    dwfl_report_end(dwfl, NULL, NULL);
-
-    for( int x = 0; x < ips->pos; x++ ) {
-        uint64_t ip = ips->ips[x];
-
-        Dwfl_Line* line = dwfl_getsrc(dwfl, ip);
-
-        if( line != NULL ) {
-            Dwfl_Module* module = dwfl_linemodule(line);
-            int lineno;
-
-            const char* filename = dwfl_lineinfo(line, NULL, &lineno, NULL, NULL, NULL);
-
-            if( filename != NULL ) {
-                const char* comp_dir = dwfl_line_comp_dir(line);
-
-                record = caml_alloc(3, 0);
-                Store_field(record, 0, caml_copy_string(comp_dir));
-                Store_field(record, 1, caml_copy_string(filename));
-                Store_field(record, 2, Val_int(lineno));
-
-                cell = caml_alloc(2, 0);
-                Store_field(cell, 0, record);
-                Store_field(cell, 1, sample_head);
-
-                sample_head = cell;
+            if( filename_length > 0 && filename[0] != '/' ) {
+                strcpy(full_path, comp_dir);
+                strcat(full_path, filename);
+            } else {
+                strcpy(full_path, filename);
             }
+
+            char* resolved_path = realpath(full_path, NULL);
+
+            sample_record = caml_alloc(2, 0);
+
+            if( resolved_path == NULL ) {
+                Store_field(sample_record, 0, caml_copy_string(full_path));
+            } else {
+                Store_field(sample_record, 0, caml_copy_string(resolved_path));
+            }
+            
+            Store_field(sample_record, 1, Val_int(lineno));
+
+            if( resolved_path != NULL ) {
+                free(resolved_path);
+            }
+
+            callback_return = caml_callback(sample_callback, sample_record);
         }
     }
 
-    dwfl_end(dwfl);
-
-    CAMLreturn(sample_head);
+    CAMLdrop;
+    return 1;
 }
 
-value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds)
+value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value sample_callback)
 {
-    CAMLparam2(ml_pid, ml_pipe_fds);
-    CAMLlocal2(result,entries);
+    CAMLparam3(ml_pid, ml_pipe_fds, sample_callback);
 
     int parent_ready_write = Long_val(ml_pipe_fds);
 
-    struct ip_list* list = malloc(sizeof(struct ip_list));
-    list->ips = malloc(INITIAL_LIST_LENGTH * sizeof(uint64_t));
+    // Set up DWARF stuff
+    static char *debuginfo_path;
 
-    if( list->ips == NULL ) {
-        perror("malloc");
-        exit(-1);
-    }
+    static const Dwfl_Callbacks offline_callbacks =
+        {
+            .find_debuginfo = dwfl_standard_find_debuginfo,
+            .debuginfo_path = &debuginfo_path,
+            .section_address = dwfl_offline_section_address,
+            .find_elf = dwfl_build_id_find_elf,
+        };
 
-    list->length = INITIAL_LIST_LENGTH;
-    list->pos = 0;
+    struct Dwfl *dwfl = dwfl_begin(&offline_callbacks);
 
-    struct mmap_node* head_ptr = NULL;
+    struct mmap_node *head_ptr = NULL;
 
     pid_t pid = Long_val(ml_pid);
 
@@ -296,20 +241,23 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds)
         err(EXIT_FAILURE, "mmap");
     }
 
-    header = (struct perf_event_mmap_page*)base;
+    header = (struct perf_event_mmap_page *)base;
     data = base + header->data_offset;
 
     // Tell child we're ready
-    char* go = "!";
+    char *go = "!";
 
-    while( 1 ) {
+    while (1)
+    {
         int ret = write(parent_ready_write, go, 1);
 
-        if( ret < 0 ) {
-            if( errno == EAGAIN || errno == EINTR ) { 
+        if (ret < 0)
+        {
+            if (errno == EAGAIN || errno == EINTR)
+            {
                 continue;
             }
-            else 
+            else
             {
                 perror("write");
                 exit(-1);
@@ -333,7 +281,8 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds)
             // Ring buffer is empty, let's wait for something interesting to happen
             int revents = poll_event(perf_fd);
 
-            if( (revents & POLLHUP) && (__atomic_load_n(&header->data_head, __ATOMIC_ACQUIRE) - tail) % header->data_size == 0 ) {
+            if ((revents & POLLHUP) && (__atomic_load_n(&header->data_head, __ATOMIC_ACQUIRE) - tail) % header->data_size == 0)
+            {
                 break;
             }
 
@@ -344,7 +293,7 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds)
         head = head % header->data_size;
         tail = tail % header->data_size;
 
-        struct perf_event_header *event_header = (struct perf_event_header*)(data + tail);
+        struct perf_event_header *event_header = (struct perf_event_header *)(data + tail);
 
         int space_left_in_ring = header->data_size - (tail + event_header->size);
 
@@ -358,7 +307,7 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds)
             memcpy(buffer, data + tail, remaining);
             memcpy(buffer + remaining, data, event_header->size - remaining);
 
-            int status = read_event(event_header->type, buffer, list, &head_ptr);
+            int status = read_event(event_header->type, buffer, sample_callback, dwfl);
 
             if (status == 0)
             {
@@ -368,7 +317,7 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds)
         else
         {
             // Fast path, can just hand the memory straight from the ring
-            int status = read_event(event_header->type, data + tail, list, &head_ptr);
+            int status = read_event(event_header->type, data + tail, sample_callback, dwfl);
 
             if (status == 0)
             {
@@ -384,43 +333,17 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds)
     close(perf_fd);
     munmap(base, (1 + DATA_PAGES) * page_size);
 
-    struct mmap_node *curr = head_ptr, *tmp, *prev = NULL, *next;
+    dwfl_end(dwfl);
 
-    // reverse our linked list
-    while( curr != NULL ) {
-        next = curr->next;
-        curr->next = prev;
-        prev = curr;
-        curr = next;
-    }
-
-    head_ptr = prev;
-
-    entries = lookup_dwarf_data(head_ptr, list);
-
-    curr = head_ptr;
-    while( curr != NULL ) {
-        tmp = curr;
-        curr = curr->next;
-        free(tmp->filename);
-        free(tmp);
-    }
-
-    // For each ip in the list, figure out which executable it maps to
-    result = caml_alloc(1,0);
-
-    Store_field(result, 0, entries);
-
-    free(list);
-
-    CAMLreturn( result );
+    CAMLreturn0;
 }
 #endif
 
 #ifdef __APPLE__
-    value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds) {
-        CAMLparam2(ml_pid, ml_pipe_fds);
+value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds)
+{
+    CAMLparam2(ml_pid, ml_pipe_fds);
 
-        CAMLreturn( Val_unit );
-    }
+    CAMLreturn(Val_unit);
+}
 #endif

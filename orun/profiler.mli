@@ -1,6 +1,6 @@
-type sample = {filename: string; line: int}
-
-type profiling_result = {samples: sample list}
+type source_line = { filename: string option; function_name: string option; line: int }
+type sample = { current : source_line; call_stack: source_line list }
+type profiling_result = { samples: sample list }
 
 val create_process_env_paused :
      string

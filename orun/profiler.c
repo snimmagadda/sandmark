@@ -3,6 +3,7 @@
 #include <caml/alloc.h>
 #include <caml/fail.h>
 #include <caml/bigarray.h>
+#include <caml/callback.h>
 
 #ifdef __linux__
 #include <linux/perf_event.h>
@@ -84,13 +85,27 @@ int poll_event(int fd)
     return pfd.revents;
 }
 
-int get_line_info(Dwfl *dwfl, uint64_t ip, const char **ip_filename, const char **ip_comp_dir, int *ip_lineno)
+value some(value contents)
+{
+    CAMLparam1(contents);
+    CAMLlocal1(option);
+
+    option = caml_alloc(1, 0);
+
+    Store_field(option, 0, contents);
+
+    CAMLreturn(option);
+}
+
+int get_line_info(Dwfl *dwfl, uint64_t ip, const char **ip_filename, const char **ip_comp_dir, const char **ip_function_name, int *ip_lineno)
 {
     Dwfl_Line *line = dwfl_getsrc(dwfl, ip);
 
     if (line != NULL)
     {
         Dwfl_Module *module = dwfl_linemodule(line);
+
+        *ip_function_name = dwfl_module_addrname(module, ip);
 
         const char *filename = dwfl_lineinfo(line, NULL, ip_lineno, NULL, NULL, NULL);
 
@@ -100,18 +115,87 @@ int get_line_info(Dwfl *dwfl, uint64_t ip, const char **ip_filename, const char 
 
             *ip_filename = filename;
             *ip_comp_dir = comp_dir;
-
-            return 0;
         }
     }
+}
 
-    return -1;
+value get_source_line_for_ip(Dwfl *dwfl, uint64_t ip)
+{
+    CAMLparam0();
+    CAMLlocal1(source_line_record);
+
+    const char *filename = NULL;
+    const char *comp_dir = NULL;
+    const char *function_name = NULL;
+    int lineno = -1;
+
+    get_line_info(dwfl, ip, &filename, &comp_dir, &function_name, &lineno);
+
+    source_line_record = caml_alloc(3, 0);
+
+    if( function_name != NULL ) {
+        Store_field(source_line_record, 1, some(caml_copy_string(function_name)));
+    } else {
+        Store_field(source_line_record, 1, Val_unit);
+    }
+
+    if (filename != NULL)
+    {
+        int filename_length = strlen(filename);
+
+        char *resolved_path = NULL;
+
+        if (filename_length > 0 && filename[0] != '/' && comp_dir != NULL)
+        {
+            char full_path[filename_length + strlen(comp_dir) + 2];
+
+            strcpy(full_path, comp_dir);
+            strcat(full_path, "/");
+            strcat(full_path, filename);
+
+            resolved_path = realpath(full_path, NULL);
+
+            if (resolved_path == NULL)
+            {
+                Store_field(source_line_record, 0, some(caml_copy_string(full_path)));
+            }
+            else
+            {
+                Store_field(source_line_record, 0, some(caml_copy_string(resolved_path)));
+                free(resolved_path);
+            }
+        }
+        else
+        {
+            resolved_path = realpath(filename, NULL);
+
+            if (resolved_path == NULL)
+            {
+                Store_field(source_line_record, 0, some(caml_copy_string(filename)));
+            }
+            else
+            {
+                Store_field(source_line_record, 0, some(caml_copy_string(resolved_path)));
+                free(resolved_path);
+            }
+        }
+    }
+    else
+    {
+        Store_field(source_line_record, 0, Val_unit);
+    }
+
+    Store_field(source_line_record, 2, Val_int(lineno));
+
+    CAMLreturn(source_line_record);
+
+    CAMLreturn(Val_unit);
 }
 
 int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *dwfl)
 {
     CAMLparam1(sample_callback);
-    CAMLlocal2(sample_record, callback_return);
+    CAMLlocal5(sample_record, branches_head, branches_entry, source_line_option, callback_return);
 
     if (type == PERF_RECORD_MMAP2)
     {
@@ -134,43 +218,37 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
 
         unsigned char *pos = buf + sizeof(struct perf_event_record_sample);
 
-        uint64_t ip = record->ip;
+        source_line_option = get_source_line_for_ip(dwfl, record->ip);
 
-        char *filename;
-        char *comp_dir;
-        int lineno;
+        sample_record = caml_alloc(2, 0);
+        Store_field(sample_record, 0, source_line_option);
 
-        if (get_line_info(dwfl, ip, &filename, &comp_dir, &lineno) >= 0)
+        branches_head = Val_unit;
+
+        // walk branch stack now and add these
+        uint64_t branches = record->bnr;
+
+        for (int c = 0; c < branches; c++)
         {
-            int filename_length = strlen(filename);
+            struct perf_branch_entry *entry = (struct perf_branch_entry *)pos;
 
-            char full_path[filename_length + strlen(comp_dir) + 1];
+            uint64_t to_ip = entry->to;
 
-            if( filename_length > 0 && filename[0] != '/' ) {
-                strcpy(full_path, comp_dir);
-                strcat(full_path, filename);
-            } else {
-                strcpy(full_path, filename);
-            }
+            source_line_option = get_source_line_for_ip(dwfl, to_ip);
 
-            char* resolved_path = realpath(full_path, NULL);
+            branches_entry = caml_alloc(2, 0);
 
-            sample_record = caml_alloc(2, 0);
+            Store_field(branches_entry, 0, source_line_option);
+            Store_field(branches_entry, 1, branches_head);
 
-            if( resolved_path == NULL ) {
-                Store_field(sample_record, 0, caml_copy_string(full_path));
-            } else {
-                Store_field(sample_record, 0, caml_copy_string(resolved_path));
-            }
-            
-            Store_field(sample_record, 1, Val_int(lineno));
+            branches_head = branches_entry;
 
-            if( resolved_path != NULL ) {
-                free(resolved_path);
-            }
-
-            callback_return = caml_callback(sample_callback, sample_record);
+            pos += sizeof(struct perf_branch_entry);
         }
+
+        Store_field(sample_record, 1, branches_head);
+
+        callback_return = caml_callback(sample_callback, sample_record);
     }
 
     CAMLdrop;
@@ -211,7 +289,7 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value samp
     pe.type = 0;
     pe.size = sizeof(pe);
     pe.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TIME | PERF_SAMPLE_BRANCH_STACK;
-    pe.branch_sample_type = PERF_SAMPLE_BRANCH_USER | PERF_SAMPLE_BRANCH_ANY;
+    pe.branch_sample_type = PERF_SAMPLE_BRANCH_USER | PERF_SAMPLE_BRANCH_CALL_STACK;
     pe.sample_freq = 3000;
     pe.freq = 1;
     pe.exclude_kernel = 1;
@@ -335,7 +413,7 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value samp
 
     dwfl_end(dwfl);
 
-    CAMLreturn0;
+    CAMLreturn(Val_unit);
 }
 #endif
 

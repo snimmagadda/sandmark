@@ -131,7 +131,7 @@ value get_source_line_for_ip(Dwfl *dwfl, uint64_t ip)
 
     get_line_info(dwfl, ip, &filename, &comp_dir, &function_name, &lineno);
 
-    source_line_record = caml_alloc(3, 0);
+    source_line_record = caml_alloc(4, 0);
 
     if( function_name != NULL ) {
         Store_field(source_line_record, 1, some(caml_copy_string(function_name)));
@@ -186,6 +186,7 @@ value get_source_line_for_ip(Dwfl *dwfl, uint64_t ip)
     }
 
     Store_field(source_line_record, 2, Val_int(lineno));
+    Store_field(source_line_record, 3, Val_int(ip));
 
     CAMLreturn(source_line_record);
 

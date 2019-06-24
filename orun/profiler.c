@@ -97,16 +97,18 @@ value some(value contents)
     CAMLreturn(option);
 }
 
-int get_line_info(Dwfl *dwfl, uint64_t ip, const char **ip_filename, const char **ip_comp_dir, const char **ip_function_name, int *ip_lineno)
+int get_line_info(Dwfl *dwfl, uint64_t ip, const char **ip_filename, const char **ip_comp_dir, const char **ip_function_name, Dwarf_Addr *addr, int *ip_lineno)
 {
+    Dwfl_Module *module = dwfl_addrmodule(dwfl, ip);
+
+    dwfl_module_relocate_address(module, addr);
+
+    *ip_function_name = dwfl_module_addrname(module, ip);
+
     Dwfl_Line *line = dwfl_getsrc(dwfl, ip);
 
     if (line != NULL)
     {
-        Dwfl_Module *module = dwfl_linemodule(line);
-
-        *ip_function_name = dwfl_module_addrname(module, ip);
-
         const char *filename = dwfl_lineinfo(line, NULL, ip_lineno, NULL, NULL, NULL);
 
         if (filename != NULL)
@@ -119,7 +121,7 @@ int get_line_info(Dwfl *dwfl, uint64_t ip, const char **ip_filename, const char 
     }
 }
 
-value get_source_line_for_ip(Dwfl *dwfl, uint64_t ip)
+value get_source_line_for_ip(Dwfl *dwfl, uint64_t ip, uint64_t cycles)
 {
     CAMLparam0();
     CAMLlocal1(source_line_record);
@@ -129,9 +131,11 @@ value get_source_line_for_ip(Dwfl *dwfl, uint64_t ip)
     const char *function_name = NULL;
     int lineno = -1;
 
-    get_line_info(dwfl, ip, &filename, &comp_dir, &function_name, &lineno);
+    Dwarf_Addr addr = ip;
 
-    source_line_record = caml_alloc(4, 0);
+    get_line_info(dwfl, ip, &filename, &comp_dir, &function_name, &addr, &lineno);
+
+    source_line_record = caml_alloc(5, 0);
 
     if( function_name != NULL ) {
         Store_field(source_line_record, 1, some(caml_copy_string(function_name)));
@@ -186,7 +190,8 @@ value get_source_line_for_ip(Dwfl *dwfl, uint64_t ip)
     }
 
     Store_field(source_line_record, 2, Val_int(lineno));
-    Store_field(source_line_record, 3, Val_int(ip));
+    Store_field(source_line_record, 3, Val_int(addr));
+    Store_field(source_line_record, 4, Val_int(cycles));
 
     CAMLreturn(source_line_record);
 
@@ -219,7 +224,7 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
 
         unsigned char *pos = buf + sizeof(struct perf_event_record_sample);
 
-        source_line_option = get_source_line_for_ip(dwfl, record->ip);
+        source_line_option = get_source_line_for_ip(dwfl, record->ip, 0);
 
         sample_record = caml_alloc(2, 0);
         Store_field(sample_record, 0, source_line_option);
@@ -235,7 +240,7 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
 
             uint64_t to_ip = entry->to;
 
-            source_line_option = get_source_line_for_ip(dwfl, to_ip);
+            source_line_option = get_source_line_for_ip(dwfl, to_ip, entry->cycles);
 
             branches_entry = caml_alloc(2, 0);
 

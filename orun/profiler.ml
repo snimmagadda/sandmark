@@ -1,4 +1,4 @@
-type source_line = { filename: string option; function_name: string option; line: int; ip: int }
+type source_line = { filename: string option; function_name: string option; line: int; addr: int; cycles: int }
 type sample = { current : source_line; call_stack: source_line list }
 type profiling_result = { samples: sample list }
 
@@ -12,7 +12,7 @@ let get_or d o =
   | Some(x) -> x
 
 let print_opt_sample s = 
-  print_endline ((get_or "??" s.filename) ^ ":" ^ (get_or "??" s.function_name) ^ ":" ^ (string_of_int s.line) ^ "\t" ^ (string_of_int s.ip))
+  print_endline ((get_or "??" s.filename) ^ ":" ^ (get_or "??" s.function_name) ^ ":" ^ (string_of_int s.line) ^ "\t" ^ (string_of_int s.addr) ^ "\t" ^ (string_of_int s.cycles))
 
 let rec print_samples x c =
   match x with 

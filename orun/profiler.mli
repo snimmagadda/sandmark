@@ -1,4 +1,4 @@
-type source_line = { filename: string option; function_name: string option; line: int; addr: int; cycles: int }
+type source_line = { filename: string option; function_name: string option; line: int; addr: int }
 type sample = { current : source_line; call_stack: source_line list }
 type profiling_result = { samples: sample list }
 

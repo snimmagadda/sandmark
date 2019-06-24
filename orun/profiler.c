@@ -61,9 +61,9 @@ struct read_format
 struct perf_event_record_sample
 {
     struct perf_event_header header;
-    uint64_t ip;   /* if PERF_SAMPLE_IP */
+    uint64_t ip;   /* if PERF_SAMPLE_IP */ 
     uint64_t time; /* if PERF_SAMPLE_TIME */
-    uint64_t bnr;  /* if PERF_SAMPLE_BRANCH_STACK */
+    uint64_t bnr;          /* if PERF_SAMPLE_CALLCHAIN */
 };
 
 long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
@@ -121,7 +121,7 @@ int get_line_info(Dwfl *dwfl, uint64_t ip, const char **ip_filename, const char 
     }
 }
 
-value get_source_line_for_ip(Dwfl *dwfl, uint64_t ip, uint64_t cycles)
+value get_source_line_for_ip(Dwfl *dwfl, uint64_t ip)
 {
     CAMLparam0();
     CAMLlocal1(source_line_record);
@@ -191,17 +191,17 @@ value get_source_line_for_ip(Dwfl *dwfl, uint64_t ip, uint64_t cycles)
 
     Store_field(source_line_record, 2, Val_int(lineno));
     Store_field(source_line_record, 3, Val_int(addr));
-    Store_field(source_line_record, 4, Val_int(cycles));
 
     CAMLreturn(source_line_record);
 
     CAMLreturn(Val_unit);
 }
 
-int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *dwfl)
+int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *dwfl, pid_t child_pid)
 {
     CAMLparam1(sample_callback);
     CAMLlocal5(sample_record, branches_head, branches_entry, source_line_option, callback_return);
+    CAMLlocal2(stack_head, stack_entry);
 
     if (type == PERF_RECORD_MMAP2)
     {
@@ -224,12 +224,13 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
 
         unsigned char *pos = buf + sizeof(struct perf_event_record_sample);
 
-        source_line_option = get_source_line_for_ip(dwfl, record->ip, 0);
+        source_line_option = get_source_line_for_ip(dwfl, record->ip);
 
         sample_record = caml_alloc(2, 0);
         Store_field(sample_record, 0, source_line_option);
 
         branches_head = Val_unit;
+        stack_head = Val_unit;
 
         // walk branch stack now and add these
         uint64_t branches = record->bnr;
@@ -240,7 +241,7 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
 
             uint64_t to_ip = entry->to;
 
-            source_line_option = get_source_line_for_ip(dwfl, to_ip, entry->cycles);
+            source_line_option = get_source_line_for_ip(dwfl, to_ip);
 
             branches_entry = caml_alloc(2, 0);
 
@@ -252,6 +253,25 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
             pos += sizeof(struct perf_branch_entry);
         }
 
+        // Read user regs
+        int num_regs = __builtin_popcount(PERF_SAMPLE_REGS_ABI_64);
+        uint64_t abi = (uint64_t)*pos;
+        pos += sizeof(uint64_t);
+        uint64_t* regs = (uint64_t*)pos;
+        regs += sizeof(uint64_t) * num_regs;
+
+        // Read user stack
+        uint64_t size = (uint64_t)*pos;
+        pos += sizeof(uint64_t);
+
+        char* data = pos;
+        pos += sizeof(char) * size;
+
+        uint64_t dyn_size = (uint64_t)*pos;
+
+        // dwfl_attach_state(dwfl, NULL, child_pid, &thread_callbacks, NULL);
+
+        // Store_field(sample_record, 1, stack_head);
         Store_field(sample_record, 1, branches_head);
 
         callback_return = caml_callback(sample_callback, sample_record);
@@ -294,7 +314,7 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value samp
 
     pe.type = 0;
     pe.size = sizeof(pe);
-    pe.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TIME | PERF_SAMPLE_BRANCH_STACK;
+    pe.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TIME | PERF_SAMPLE_BRANCH_STACK | PERF_SAMPLE_STACK_USER | PERF_SAMPLE_REGS_USER;
     pe.branch_sample_type = PERF_SAMPLE_BRANCH_USER | PERF_SAMPLE_BRANCH_CALL_STACK;
     pe.sample_freq = 3000;
     pe.freq = 1;
@@ -307,6 +327,8 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value samp
     pe.mmap = 1;
     pe.mmap2 = 1;
     pe.wakeup_events = 1;
+    pe.sample_stack_user = getpagesize() * 4;
+    pe.sample_regs_user = PERF_SAMPLE_REGS_ABI_64;
 
     perf_fd = perf_event_open(&pe, pid, -1, -1, 0);
 
@@ -351,6 +373,7 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value samp
         break;
     }
 
+    pid_t child_pid = Int_val(ml_pid);
     uint64_t data_read = 0;
 
     while (1)
@@ -391,7 +414,7 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value samp
             memcpy(buffer, data + tail, remaining);
             memcpy(buffer + remaining, data, event_header->size - remaining);
 
-            int status = read_event(event_header->type, buffer, sample_callback, dwfl);
+            int status = read_event(event_header->type, buffer, sample_callback, dwfl, child_pid);
 
             if (status == 0)
             {
@@ -401,7 +424,7 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value samp
         else
         {
             // Fast path, can just hand the memory straight from the ring
-            int status = read_event(event_header->type, data + tail, sample_callback, dwfl);
+            int status = read_event(event_header->type, data + tail, sample_callback, dwfl, child_pid);
 
             if (status == 0)
             {

@@ -1,6 +1,7 @@
-type source_line = { filename: string option; function_name: string option; line: int; addr: int }
+type source_line = { filename: string option; function_name: string option; line: int; offset: int }
 type sample = { current : source_line; call_stack: source_line list }
-type profiling_result = { samples: sample list }
+type counts = { mutable self_time: int; mutable total_time: int }
+type aggregate_result = (source_line, counts) Hashtbl.t
 
 external unpause_and_start_profiling :
   int -> Unix.file_descr -> ( sample -> unit ) -> unit
@@ -11,31 +12,39 @@ let get_or d o =
   | None -> d
   | Some(x) -> x
 
-let print_opt_sample s = 
-  print_endline ((get_or "??" s.filename) ^ ":" ^ (get_or "??" s.function_name) ^ ":" ^ (string_of_int s.line) ^ "\t" ^ (string_of_int s.addr))
+exception ExpectedSome
 
-let rec print_samples x c =
-  match x with 
-  | (h :: l) ->
-    begin
-    print_string ((string_of_int c) ^ ": ");
-    print_opt_sample h;
-    if not( l == [] ) then
-      print_samples l (c+1)
-    else
-      ()
-    end
+let unwrap = function
+  | None -> raise ExpectedSome()
+  | Some(x) -> x
+
+let agg_hash = Hashtbl.create 1000
+
+let update_line src_line self_time_inc total_time_inc = 
+  match Hashtbl.find_opt agg_hash src_line with
+  | None -> Hashtbl.add agg_hash src_line { self_time = 1; total_time = 1 }
+  | Some(x) -> begin
+                x.self_time <- (x.self_time+self_time_inc);
+                x.total_time <- (x.total_time+total_time_inc);
+              end
+  
+let rec update_lines = function
   | [] -> ()
+  | (h :: t) -> 
+    begin
+      update_line h 0 1;
+      update_lines t
+    end
 
 let sample_callback sample = 
-  begin
-  print_opt_sample sample.current;
-  print_samples sample.call_stack 0;
-  end
+  (* increment self for the current source line *)
+  update_line sample.current 1 1;
+  update_lines sample.call_stack
+
 
 let start_profiling pid pipe_fd =
   unpause_and_start_profiling pid pipe_fd sample_callback;
-  {samples = []}
+  agg_hash
 
 let int_of_fd (x : Unix.file_descr) : int = Obj.magic x
 
@@ -84,8 +93,10 @@ let slash_regex = Str.regexp "[/\.]"
 let safe_file_name x =
   Str.global_replace slash_regex "_" x
 
-let write_source_file name res src_file =
-  let line_map = StringMap.find src_file res in
+let write_source_file name total_samples src_line_counts =
+  let line_map = List.fold_left (fun m (k,v) -> IntMap.update k.line (function | None -> Some(v) | Some(x) -> Some({ self_time = v.self_time + x.self_time; total_time = v.total_time + x.total_time })) m) IntMap.empty src_line_counts in
+  let src_file = match List.hd src_line_counts with
+                 | ({ filename = Some(f) }, _) -> f in
   let new_src_file = safe_file_name src_file in
   let original_src = open_in src_file in
   let new_src = open_out (name ^ "_prof_results/" ^ new_src_file ^ ".html") in
@@ -93,10 +104,10 @@ let write_source_file name res src_file =
     try
   while true; do
     let src_line = input_line original_src in
-    let count = match IntMap.find_opt !current_line line_map with
+    let counts = match IntMap.find_opt !current_line line_map with
                 | Some(x) -> x
-                | None -> 0 in
-    output_string new_src ((string_of_int count) ^ ": " ^ src_line ^ "\n");
+                | None -> { self_time = 0; total_time = 0 } in
+    output_string new_src ((string_of_int counts.self_time) ^ " " ^ (string_of_int counts.total_time) ^ ": " ^ src_line ^ "\n");
     incr current_line
   done; ()
 with End_of_file ->
@@ -105,19 +116,43 @@ with End_of_file ->
     close_in original_src;
   end
 
+let add_to_line_list src_line counts l =
+  match l with 
+  | None -> Some([(src_line, counts)])
+  | Some(v) -> Some((src_line, counts)::v)
 
-let write_profiling_result output_name result =
+let group_by_source_file src_line counts m =
+  match src_line.filename with
+  | None -> m
+  | Some(f) -> StringMap.update f (function | None -> Some(IntMap.add src_line.line [(src_line, counts)] IntMap.empty) | Some(l) -> Some(IntMap.update src_line.line (add_to_line_list src_line counts) l)) m 
+
+let rec take l n =
+  match (l, n) with
+  | ([], _) -> []
+  | (_, 0) -> []
+  | (h :: tl, _) -> h :: (take tl (n-1))
+
+let source_line_counts_to_json src_line counts =
+  `Assoc [("filename", `String (get_or "" src_line.filename));("function", `String (get_or "" src_line.function_name));("line", `Int src_line.line);("offset", `Int src_line.offset);("self_time", `Int counts.self_time);("total_time", `Int counts.total_time)]
+
+let hotspots_to_json hotspots =
+  (`List (List.map (fun (k,v) -> source_line_counts_to_json k v) hotspots))
+
+let write_profiling_result output_name agg_result =
   (* first write out the json representation of results *)
-  (*let total_samples = List.length result.samples in
-  let aggregate_results = List.fold_left update_source_map StringMap.empty result.samples in
+  let total_samples = Hashtbl.fold (fun a b c -> c+(b.self_time)) agg_result 0 in
+  let key_values = Hashtbl.fold (fun a b c -> (a, b)::c) agg_result [] in
+  let only_present_filenames = List.filter (function | ({ filename = None }, _) -> false | ({ filename = Some(x) }, _) -> Sys.file_exists x) key_values in
+  let grouped_by_filename = List.fold_left (fun m (k,v) -> StringMap.update (unwrap k.filename) (function | None -> Some([(k,v)]) | Some(l) -> Some((k,v)::l)) m) StringMap.empty only_present_filenames in
+  let hotspots = take (List.sort (fun (k0,v0) (k1,v1) -> v1.self_time - v0.self_time) key_values) 10 in
+  (*let results_by_file = Hashtbl.fold group_by_source_file agg_result StringMap.empty in*)
   let profile_out = open_out_bin (output_name ^ ".prof") in
-  let json_results =
-    (`Assoc (List.map (fun (k,v) -> (k, `List (List.map (fun (a,b) -> `List [`Int a; `Int b]) (IntMap.bindings v)))) (StringMap.bindings aggregate_results)))
+  let hotspots_json =
+    `Assoc [("hotspots", hotspots_to_json hotspots)]
   in
-  Yojson.Basic.to_channel profile_out json_results;
+  Yojson.Basic.to_channel profile_out hotspots_json;
   close_out profile_out;
   let dir_name = output_name ^ "_prof_results" in
     if not (Sys.file_exists dir_name) then Unix.mkdir dir_name 0o740;
   (* Now we actually write out an HTML report *)
-  let source_files_that_exist = List.filter (fun (k,v) -> Sys.file_exists k) (StringMap.bindings aggregate_results) in
-    List.iter (write_source_file output_name aggregate_results) (List.map (fun (k,v) -> k) source_files_that_exist)*) ()
+    List.iter (write_source_file output_name total_samples) (List.map (fun (k,v) -> v) (StringMap.bindings grouped_by_filename))

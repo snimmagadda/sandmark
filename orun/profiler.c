@@ -201,7 +201,6 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
 {
     CAMLparam1(sample_callback);
     CAMLlocal5(sample_record, branches_head, branches_entry, source_line_option, callback_return);
-    CAMLlocal2(stack_head, stack_entry);
 
     if (type == PERF_RECORD_MMAP2)
     {
@@ -230,7 +229,6 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
         Store_field(sample_record, 0, source_line_option);
 
         branches_head = Val_unit;
-        stack_head = Val_unit;
 
         // walk branch stack now and add these
         uint64_t branches = record->bnr;
@@ -253,25 +251,6 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
             pos += sizeof(struct perf_branch_entry);
         }
 
-        // Read user regs
-        int num_regs = __builtin_popcount(PERF_SAMPLE_REGS_ABI_64);
-        uint64_t abi = (uint64_t)*pos;
-        pos += sizeof(uint64_t);
-        uint64_t* regs = (uint64_t*)pos;
-        regs += sizeof(uint64_t) * num_regs;
-
-        // Read user stack
-        uint64_t size = (uint64_t)*pos;
-        pos += sizeof(uint64_t);
-
-        char* data = pos;
-        pos += sizeof(char) * size;
-
-        uint64_t dyn_size = (uint64_t)*pos;
-
-        // dwfl_attach_state(dwfl, NULL, child_pid, &thread_callbacks, NULL);
-
-        // Store_field(sample_record, 1, stack_head);
         Store_field(sample_record, 1, branches_head);
 
         callback_return = caml_callback(sample_callback, sample_record);
@@ -314,7 +293,7 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value samp
 
     pe.type = 0;
     pe.size = sizeof(pe);
-    pe.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TIME | PERF_SAMPLE_BRANCH_STACK | PERF_SAMPLE_STACK_USER | PERF_SAMPLE_REGS_USER;
+    pe.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TIME | PERF_SAMPLE_BRANCH_STACK;
     pe.branch_sample_type = PERF_SAMPLE_BRANCH_USER | PERF_SAMPLE_BRANCH_CALL_STACK;
     pe.sample_freq = 3000;
     pe.freq = 1;
@@ -327,8 +306,6 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value samp
     pe.mmap = 1;
     pe.mmap2 = 1;
     pe.wakeup_events = 1;
-    pe.sample_stack_user = getpagesize() * 4;
-    pe.sample_regs_user = PERF_SAMPLE_REGS_ABI_64;
 
     perf_fd = perf_event_open(&pe, pid, -1, -1, 0);
 

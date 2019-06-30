@@ -91,5 +91,39 @@ let render_hotspot output total_samples idx
 
 let render_hotspots output_name hotspots total_samples =
   let hotspots_file = open_out (output_name ^ "_prof_results/hotspots.html") in
-  fprintf hotspots_file "%s" (common_header output_name) ;
-  List.iteri (render_hotspot hotspots_file total_samples) hotspots
+   fprintf hotspots_file "%s" (common_header output_name) ;
+   List.iteri (render_hotspot hotspots_file total_samples) hotspots
+
+let generate_stacks stack_idxs sample =
+  let max_idx = (List.length sample.stack)-1 in
+  let stack_json = List.mapi (fun depth stack -> 
+      let src_line = Hashtbl.find stack_idxs stack in
+        let category = match src_line.filename with
+        | None -> "unknown"
+        | Some(x) -> (Filename.basename x) in
+          let name = (get_or "unknown" src_line.function_name) in
+            let base_list = [("name", `String (category ^ ":" ^ name))] in
+              let related_list = match depth with
+              | x when x = max_idx -> base_list
+              | n -> (("parent", `String ((string_of_int sample.id) ^ "_" ^ (string_of_int (n+1)))) :: base_list) in
+                (((string_of_int sample.id) ^ "_" ^ (string_of_int depth)), `Assoc related_list)
+  ) sample.stack in
+    stack_json
+
+let generate_all_stacks stack_idxs samples =
+  List.flatten (List.map (generate_stacks stack_idxs) samples)
+
+let convert_sample stack_idxs sample =
+    `Assoc [("cpu", `Int sample.cpu); ("tid", `Int sample.thread_id); ("ts", `Float (float_of_int sample.timestamp)); ("name", `String "perf-cpu"); ("sf", `String ((string_of_int sample.id) ^ "_0" ));("weight", `Int 1)]
+
+let stack_frames samples stack_idxs =
+  List.map (convert_sample stack_idxs) samples
+
+let render_trace_json output_name samples stack_idxs =
+  let inverted_idxs = invert_hashtbl stack_idxs in
+  let output_file = open_out (output_name ^ "_prof_results/trace.json") in
+    let trace_json =
+    `Assoc
+      [ ("traceEvents", `List []); ("samples", `List (stack_frames samples inverted_idxs)); ("stackFrames", `Assoc (generate_all_stacks inverted_idxs samples)) ]
+  in
+  Yojson.Basic.to_channel output_file trace_json ;

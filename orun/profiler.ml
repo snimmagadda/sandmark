@@ -5,8 +5,6 @@ external unpause_and_start_profiling :
   int -> Unix.file_descr -> (sample -> unit) -> unit
   = "ml_unpause_and_start_profiling"
 
-let get_or d o = match o with None -> d | Some x -> x
-
 exception ExpectedSome
 
 let unwrap = function None -> raise ExpectedSome() | Some x -> x
@@ -44,7 +42,12 @@ let sample_callback sample =
   update_line sample.current 1 1 ;
   update_lines sample.call_stack ;
   let new_stack = List.map (fun a -> find_src_line_idx a) sample.call_stack in
-    samples_list := (new_stack :: !samples_list)
+    let compressed_stack = { stack = ((find_src_line_idx sample.current) :: (List.rev new_stack));
+                             thread_id = sample.thread_id ;
+                             cpu = sample.cpu ;
+                             timestamp = sample.timestamp ;
+                             id = sample.id } in
+    samples_list := (compressed_stack :: !samples_list)
 
 let start_profiling pid pipe_fd =
   unpause_and_start_profiling pid pipe_fd sample_callback ;
@@ -234,4 +237,5 @@ let write_profiling_result output_name (agg_result : aggregate_result) =
   close_out profile_out ;
   let dir_name = output_name ^ "_prof_results" in
   if not (Sys.file_exists dir_name) then Unix.mkdir dir_name 0o740 ;
-  Reports.render_hotspots output_name hotspots total_samples
+  Reports.render_hotspots output_name hotspots total_samples;
+  Reports.render_trace_json output_name !samples_list src_line_to_idx;

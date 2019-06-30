@@ -62,7 +62,11 @@ struct perf_event_record_sample
 {
     struct perf_event_header header;
     uint64_t ip;   /* if PERF_SAMPLE_IP */
+    uint32_t pid;  /* if PERF_SAMPLE_TID */
+    uint32_t tid;  /* if PERF_SAMPLE_TID */
     uint64_t time; /* if PERF_SAMPLE_TIME */
+    uint32_t cpu;  /* if PERF_SAMPLE_CPU */
+    uint32_t res;  /* if PERF_SAMPLE_CPU */
     uint64_t bnr;  /* if PERF_SAMPLE_CALLCHAIN */
 };
 
@@ -200,7 +204,7 @@ value get_source_line_for_ip(Dwfl *dwfl, uint64_t ip)
     CAMLreturn(Val_unit);
 }
 
-int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *dwfl, pid_t child_pid)
+int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *dwfl, pid_t child_pid, int* sample_id)
 {
     CAMLparam1(sample_callback);
     CAMLlocal5(sample_record, branches_head, branches_entry, source_line_option, callback_return);
@@ -228,7 +232,7 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
 
         source_line_option = get_source_line_for_ip(dwfl, record->ip);
 
-        sample_record = caml_alloc(3, 0);
+        sample_record = caml_alloc(6, 0);
         Store_field(sample_record, 0, source_line_option);
 
         branches_head = Val_unit;
@@ -256,6 +260,11 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
 
         Store_field(sample_record, 1, branches_head);
         Store_field(sample_record, 2, Val_int(record->time));
+        Store_field(sample_record, 3, Val_int(record->tid));
+        Store_field(sample_record, 4, Val_int(record->cpu));
+        Store_field(sample_record, 5, Val_int(*sample_id));
+        
+        (*sample_id)++;
 
         callback_return = caml_callback(sample_callback, sample_record);
     }
@@ -269,6 +278,8 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value samp
     CAMLparam3(ml_pid, ml_pipe_fds, sample_callback);
 
     int parent_ready_write = Long_val(ml_pipe_fds);
+
+    int sample_id = 0;
 
     // Set up DWARF stuff
     static char *debuginfo_path;
@@ -297,7 +308,7 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value samp
 
     pe.type = 0;
     pe.size = sizeof(pe);
-    pe.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TIME | PERF_SAMPLE_BRANCH_STACK;
+    pe.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TIME | PERF_SAMPLE_CPU | PERF_SAMPLE_TID | PERF_SAMPLE_BRANCH_STACK;
     pe.branch_sample_type = PERF_SAMPLE_BRANCH_USER | PERF_SAMPLE_BRANCH_CALL_STACK;
     pe.sample_freq = 3000;
     pe.freq = 1;
@@ -395,7 +406,7 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value samp
             memcpy(buffer, data + tail, remaining);
             memcpy(buffer + remaining, data, event_header->size - remaining);
 
-            int status = read_event(event_header->type, buffer, sample_callback, dwfl, child_pid);
+            int status = read_event(event_header->type, buffer, sample_callback, dwfl, child_pid, &sample_id);
 
             if (status == 0)
             {
@@ -405,7 +416,7 @@ value ml_unpause_and_start_profiling(value ml_pid, value ml_pipe_fds, value samp
         else
         {
             // Fast path, can just hand the memory straight from the ring
-            int status = read_event(event_header->type, data + tail, sample_callback, dwfl, child_pid);
+            int status = read_event(event_header->type, data + tail, sample_callback, dwfl, child_pid, &sample_id);
 
             if (status == 0)
             {

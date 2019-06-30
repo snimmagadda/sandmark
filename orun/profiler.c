@@ -237,9 +237,9 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
         {
             struct perf_branch_entry *entry = (struct perf_branch_entry *)pos;
 
-            uint64_t to_ip = entry->to;
+            uint64_t from_ip = entry->from;
 
-            source_line_option = get_source_line_for_ip(dwfl, to_ip);
+            source_line_option = get_source_line_for_ip(dwfl, from_ip);
 
             branches_entry = caml_alloc(2, 0);
 

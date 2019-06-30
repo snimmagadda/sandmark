@@ -9,7 +9,7 @@ let get_or d o = match o with None -> d | Some x -> x
 
 exception ExpectedSome
 
-let unwrap = function None -> raise ExpectedSome () | Some x -> x
+let unwrap = function None -> raise ExpectedSome() | Some x -> x
 
 let agg_hash = Hashtbl.create 1000
 
@@ -27,10 +27,24 @@ let rec update_lines = function
   | h :: t ->
       update_line h 0 1 ; update_lines t
 
+let src_line_to_idx = (Hashtbl.create 10000)
+
+let find_src_line_idx src_line =
+  match Hashtbl.find_opt src_line_to_idx src_line with
+  | None -> begin
+              let new_idx = Hashtbl.length src_line_to_idx in
+                Hashtbl.add src_line_to_idx src_line new_idx; new_idx
+            end
+  | Some(x) -> x
+
+let samples_list = ref []
+
 let sample_callback sample =
   (* increment self for the current source line *)
   update_line sample.current 1 1 ;
-  update_lines sample.call_stack
+  update_lines sample.call_stack ;
+  let new_stack = List.map (fun a -> find_src_line_idx a) sample.call_stack in
+    samples_list := (new_stack :: !samples_list)
 
 let start_profiling pid pipe_fd =
   unpause_and_start_profiling pid pipe_fd sample_callback ;

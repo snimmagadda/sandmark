@@ -61,9 +61,9 @@ struct read_format
 struct perf_event_record_sample
 {
     struct perf_event_header header;
-    uint64_t ip;   /* if PERF_SAMPLE_IP */ 
+    uint64_t ip;   /* if PERF_SAMPLE_IP */
     uint64_t time; /* if PERF_SAMPLE_TIME */
-    uint64_t bnr;          /* if PERF_SAMPLE_CALLCHAIN */
+    uint64_t bnr;  /* if PERF_SAMPLE_CALLCHAIN */
 };
 
 long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
@@ -137,9 +137,12 @@ value get_source_line_for_ip(Dwfl *dwfl, uint64_t ip)
 
     source_line_record = caml_alloc(5, 0);
 
-    if( function_name != NULL ) {
+    if (function_name != NULL)
+    {
         Store_field(source_line_record, 1, some(caml_copy_string(function_name)));
-    } else {
+    }
+    else
+    {
         Store_field(source_line_record, 1, Val_unit);
     }
 
@@ -225,7 +228,7 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
 
         source_line_option = get_source_line_for_ip(dwfl, record->ip);
 
-        sample_record = caml_alloc(2, 0);
+        sample_record = caml_alloc(3, 0);
         Store_field(sample_record, 0, source_line_option);
 
         branches_head = Val_unit;
@@ -252,6 +255,7 @@ int read_event(uint32_t type, unsigned char *buf, value sample_callback, Dwfl *d
         }
 
         Store_field(sample_record, 1, branches_head);
+        Store_field(sample_record, 2, Val_int(record->time));
 
         callback_return = caml_callback(sample_callback, sample_record);
     }
